@@ -44,6 +44,7 @@ from .iterators import LogsFromIterator
 from .gateway import *
 from .emoji import Emoji
 from .http import HTTPClient
+from .webhook import Webhook
 
 import asyncio
 import aiohttp
@@ -3317,3 +3318,46 @@ class Client:
         """
         data = yield from self.http.get_user_info(user_id)
         return User(**data)
+    
+    @asyncio.coroutine
+    def get_channel_webhooks(self, channel):
+        """|coro|
+
+        Retrieves a list of :class:`Webhooks` in the given channel.
+
+        Parameters
+        -----------
+        channel: str
+            Given the channel object or channel id.
+
+        Returns
+        --------
+        :class:`Webhook`
+            List of webhooks in the given channel
+
+        Raises
+        -------
+        NotFound
+            A channel with this ID does not exist.
+        HTTPException
+            Fetching the user failed.
+        """
+        if not isinstance(channel, Channel):
+            channel = self.get_channel(channel)
+        if channel._webhook_list_up_to_date:
+            return channel.webhooks
+        data = yield from self.http.get_channel_webhooks(channel.id)
+        channel.webhooks = [Webhook(**webhook) for webhook in data]
+        channel._webhook_list_up_to_date = True
+        return channel.webhooks
+    
+    @asyncio.coroutine
+    def get_server_webhooks(self, server):
+        if not isinstance(server, Server):
+            server = self.get_server(server)
+        webhooks = []
+        for channel in server.channels:
+            if channel.type == ChannelType.text:
+                chanhooks = yield from self.get_channel_webhooks(channel)
+                webhooks.extend(chanhooks)
+        return webhooks

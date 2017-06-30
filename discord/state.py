@@ -36,6 +36,7 @@ from .role import Role
 from . import utils, compat
 from .enums import Status, ChannelType, try_enum
 from .calls import GroupCall
+from .webhook import Webhook
 
 from collections import deque, namedtuple
 import copy, enum, math
@@ -686,6 +687,14 @@ class ConnectionState:
         call = self._calls.pop(data.get('channel_id'), None)
         if call is not None:
             self.dispatch('call_remove', call)
+    
+    def parse_webhooks_update(self, data):
+        server = self._get_server(data.get('guild_id'))
+        if server is not None:
+            channel = server.get_channel(data.get('channel_id'))
+            #channel._update_webhooks()
+            channel._webhook_list_up_to_date = False
+            self.dispatch('webhooks_update', channel)
 
     def _get_member(self, channel, id):
         if channel.is_private:

@@ -621,6 +621,12 @@ class HTTPClient:
 
     def move_member(self, user_id, guild_id, channel_id):
         return self.edit_member(guild_id=guild_id, user_id=user_id, channel_id=channel_id)
+    
+    # Webhook management
+    
+    def get_channel_webhooks(self, channel_id):
+        r = Route('GET', '/channels/{channel_id}/webhooks', channel_id=channel_id)
+        return self.request(r)
 
     # Misc
 

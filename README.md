@@ -9,6 +9,13 @@ This was written to allow easier writing of bots or chat logs. Make sure to fami
 
 [doc]: http://discordpy.rtfd.org/en/latest
 
+### Changes
+This fork implements the following additions/changes:
+* Webhook
+    * Listen for changes
+    * Store Webhooks in channel objects
+    * Get list of webhooks via channel or server
+
 ### Breaking Changes
 
 The discord API is constantly changing and the wrapper API is as well. There will be no effort to keep backwards compatibility in versions before `v1.0.0`.
