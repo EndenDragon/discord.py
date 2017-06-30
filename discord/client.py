@@ -3347,6 +3347,9 @@ class Client:
         if channel._webhook_list_up_to_date:
             return channel.webhooks
         data = yield from self.http.get_channel_webhooks(channel.id)
+        for webhook in data:
+            webhook["server"] = self.get_server(webhook.get('guild_id'))
+            webhook["channel"] = self.get_channel(webhook.get('channel_id'))
         channel.webhooks = [Webhook(**webhook) for webhook in data]
         channel._webhook_list_up_to_date = True
         return channel.webhooks
