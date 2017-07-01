@@ -627,6 +627,10 @@ class HTTPClient:
     def get_channel_webhooks(self, channel_id):
         r = Route('GET', '/channels/{channel_id}/webhooks', channel_id=channel_id)
         return self.request(r)
+    
+    def get_server_webhooks(self, server_id):
+        r = Route('GET', '/guilds/{guild_id}/webhooks', guild_id=server_id)
+        return self.request(r)
 
     # Misc
 

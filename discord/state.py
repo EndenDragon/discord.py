@@ -355,6 +355,7 @@ class ConnectionState:
             if channel is not None:
                 server._remove_channel(channel)
                 self.dispatch('channel_delete', channel)
+                self.dispatch('webhooks_update', channel.server)
 
     def parse_channel_update(self, data):
         channel_type = try_enum(ChannelType, data.get('type'))
@@ -691,10 +692,8 @@ class ConnectionState:
     def parse_webhooks_update(self, data):
         server = self._get_server(data.get('guild_id'))
         if server is not None:
-            channel = server.get_channel(data.get('channel_id'))
-            #channel._update_webhooks()
-            channel._webhook_list_up_to_date = False
-            self.dispatch('webhooks_update', channel)
+            server._webhook_list_up_to_date = False
+            self.dispatch('webhooks_update', server)
 
     def _get_member(self, channel, id):
         if channel.is_private:

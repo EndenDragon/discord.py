@@ -3344,23 +3344,24 @@ class Client:
         """
         if not isinstance(channel, Channel):
             channel = self.get_channel(channel)
-        if channel._webhook_list_up_to_date:
-            return channel.webhooks
-        data = yield from self.http.get_channel_webhooks(channel.id)
-        for webhook in data:
-            webhook["server"] = self.get_server(webhook.get('guild_id'))
-            webhook["channel"] = self.get_channel(webhook.get('channel_id'))
-        channel.webhooks = [Webhook(**webhook) for webhook in data]
-        channel._webhook_list_up_to_date = True
-        return channel.webhooks
+        webhooks = []
+        server = channel.server
+        server_webhooks = yield from self.get_server_webhooks(server)
+        for webhook in server_webhooks:
+            if webhook.channel.id == channel.id:
+                webhooks.append(webhook)
+        return webhooks
     
     @asyncio.coroutine
     def get_server_webhooks(self, server):
         if not isinstance(server, Server):
             server = self.get_server(server)
-        webhooks = []
-        for channel in server.channels:
-            if channel.type == ChannelType.text:
-                chanhooks = yield from self.get_channel_webhooks(channel)
-                webhooks.extend(chanhooks)
-        return webhooks
+        if server._webhook_list_up_to_date:
+            return server.webhooks
+        data = yield from self.http.get_server_webhooks(server.id)
+        for webhook in data:
+            webhook["server"] = server
+            webhook["channel"] = self.get_channel(webhook.get('channel_id'))
+        server.webhooks = [Webhook(**webhook) for webhook in data]
+        server._webhook_list_up_to_date = True
+        return server.webhooks

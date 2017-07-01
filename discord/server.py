@@ -32,6 +32,7 @@ from .game import Game
 from .channel import Channel
 from .enums import ServerRegion, Status, try_enum, VerificationLevel
 from .mixins import Hashable
+from .webhook import Webhook
 
 class Server(Hashable):
     """Represents a Discord server.
@@ -112,13 +113,16 @@ class Server(Hashable):
                  'name', 'id', 'owner', 'unavailable', 'name', 'region',
                  '_default_role', '_default_channel', 'roles', '_member_count',
                  'large', 'owner_id', 'mfa_level', 'emojis', 'features',
-                 'verification_level', 'splash' ]
+                 'verification_level', 'splash', 'webhooks', '_webhook_list_up_to_date']
 
     def __init__(self, **kwargs):
         self._channels = {}
         self.owner = None
         self._members = {}
         self._from_data(kwargs)
+
+        self.webhooks = []
+        self._webhook_list_up_to_date = False
 
     @property
     def channels(self):
@@ -132,7 +136,11 @@ class Server(Hashable):
         self._channels[channel.id] = channel
 
     def _remove_channel(self, channel):
+        self._remove_channel_webhooks(channel)
         self._channels.pop(channel.id, None)
+    
+    def _remove_channel_webhooks(self, channel):
+        self.webhooks = [w for w in self.webhooks if not w.channel.id == channel.id]
 
     @property
     def members(self):

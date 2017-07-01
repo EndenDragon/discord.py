@@ -32,7 +32,6 @@ from .mixins import Hashable
 from .role import Role
 from .user import User
 from .member import Member
-from .webhook import Webhook
 
 Overwrites = namedtuple('Overwrites', 'id allow deny type')
 
@@ -84,14 +83,11 @@ class Channel(Hashable):
 
     __slots__ = [ 'voice_members', 'name', 'id', 'server', 'topic', 'position',
                   'is_private', 'type', 'bitrate', 'user_limit',
-                  '_permission_overwrites', 'webhooks', '_webhook_list_up_to_date' ]
+                  '_permission_overwrites']
 
     def __init__(self, **kwargs):
         self._update(**kwargs)
         self.voice_members = []
-        
-        self.webhooks = []
-        self._webhook_list_up_to_date = False
 
     def __str__(self):
         return self.name
