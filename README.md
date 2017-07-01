@@ -13,7 +13,7 @@ This was written to allow easier writing of bots or chat logs. Make sure to fami
 This fork implements the following additions/changes:
 * Webhook
     * Listen for changes
-    * Store Webhooks in channel objects
+    * Store Webhooks in server objects
     * Get list of webhooks via channel or server
 
 ### Breaking Changes
