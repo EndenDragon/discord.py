@@ -3028,7 +3028,7 @@ class Client:
             overwrite = discord.PermissionOverwrite()
             overwrite.read_messages = True
             overwrite.ban_members = False
-            yield from client.edit_channel_permissions(message.channel, message.author, overwrite)
+            await client.edit_channel_permissions(message.channel, message.author, overwrite)
 
         Parameters
         -----------
