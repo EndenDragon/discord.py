@@ -370,9 +370,10 @@ class ConnectionState:
         server = self._get_server(data.get('guild_id'))
         if server is not None:
             channel = server.get_channel(channel_id)
+            parent = server.get_channel(data.get('parent_id'))
             if channel is not None:
                 old_channel = copy.copy(channel)
-                channel._update(server=server, **data)
+                channel._update(server=server, parent=parent, **data)
                 self.dispatch('channel_update', old_channel, channel)
 
     def parse_channel_create(self, data):
@@ -384,7 +385,8 @@ class ConnectionState:
         else:
             server = self._get_server(data.get('guild_id'))
             if server is not None:
-                channel = Channel(server=server, **data)
+                parent = server.get_channel(data.get('parent_id'))
+                channel = Channel(server=server, parent=parent, **data)
                 server._add_channel(channel)
 
         self.dispatch('channel_create', channel)

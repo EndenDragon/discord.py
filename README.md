@@ -15,6 +15,8 @@ This fork implements the following additions/changes:
     * Listen for changes
     * Store Webhooks in server objects
     * Get list of webhooks via channel or server
+* Channel
+    * Get the parent channel
 
 ### Breaking Changes
 

@@ -31,6 +31,7 @@ class ChannelType(Enum):
     private = 1
     voice   = 2
     group   = 3
+    category= 4
 
     def __str__(self):
         return self.name
