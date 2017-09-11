@@ -81,8 +81,8 @@ class Channel(Hashable):
         The channel's limit for number of members that can be in a voice channel.
     """
 
-    __slots__ = [ 'voice_members', 'name', 'id', 'server', 'topic', 'parent',
-                  'position', 'is_private', 'type', 'bitrate', 'user_limit',
+    __slots__ = [ 'voice_members', 'name', 'id', 'server', 'topic', 'position',
+                  'is_private', 'type', 'bitrate', 'user_limit', '_parent_id',
                   '_permission_overwrites']
 
     def __init__(self, **kwargs):
@@ -102,7 +102,7 @@ class Channel(Hashable):
         self.bitrate = kwargs.get('bitrate')
         self.type = kwargs.get('type')
         self.user_limit = kwargs.get('user_limit')
-        self.parent = kwargs.get('parent')
+        self._parent_id = kwargs.get('parent_id')
         try:
             self.type = ChannelType(self.type)
         except:
@@ -131,6 +131,10 @@ class Channel(Hashable):
         tmp = self._permission_overwrites
         if tmp:
             tmp[everyone_index], tmp[0] = tmp[0], tmp[everyone_index]
+    
+    @property
+    def parent(self):
+        return self.server.get_channel(self._parent_id)
 
     @property
     def changed_roles(self):
