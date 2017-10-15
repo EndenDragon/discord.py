@@ -257,6 +257,7 @@ class ConnectionState:
                     # embed only edit
                     message.embeds = data['embeds']
                 if "author" in data:
+                    # webhooks can trigger avatar updates
                     message.author = User(**data.get('author', {}))
             else:
                 message._update(channel=message.channel, **data)

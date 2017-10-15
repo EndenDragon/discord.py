@@ -17,6 +17,8 @@ This fork implements the following additions/changes:
     * Get list of webhooks via channel or server
 * Channel
     * Get the parent channel
+* State
+    * Webhooks can also trigger avatar updates in messages
 
 ### Breaking Changes
 
