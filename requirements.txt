@@ -1,2 +1,2 @@
-aiohttp>=1.0.0,<1.1.0
+aiohttp
 websockets>=3.1,<4.0
