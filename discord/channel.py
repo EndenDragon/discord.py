@@ -82,8 +82,8 @@ class Channel(Hashable):
     """
 
     __slots__ = [ 'voice_members', 'name', 'id', 'server', 'topic', 'position',
-                  'is_private', 'type', 'bitrate', 'user_limit', '_parent_id',
-                  '_permission_overwrites']
+                  'is_private', 'is_nsfw', 'type', 'bitrate', 'user_limit',
+                  '_parent_id', '_permission_overwrites']
 
     def __init__(self, **kwargs):
         self._update(**kwargs)
@@ -98,6 +98,7 @@ class Channel(Hashable):
         self.id = kwargs.get('id')
         self.topic = kwargs.get('topic')
         self.is_private = False
+        self.is_nsfw = kwargs.get("nsfw", False)
         self.position = kwargs.get('position')
         self.bitrate = kwargs.get('bitrate')
         self.type = kwargs.get('type')
