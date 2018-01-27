@@ -17,6 +17,7 @@ This fork implements the following additions/changes:
     * Get list of webhooks via channel or server
 * Channel
     * Get the parent channel
+    * Get if the channel is marked as NSFW
 * State
     * Webhooks can also trigger avatar updates in messages
 
