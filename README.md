@@ -20,6 +20,8 @@ This fork implements the following additions/changes:
     * Get if the channel is marked as NSFW
 * State
     * Webhooks can also trigger avatar updates in messages
+* Emoji
+    * Animated emoji support
 
 ### Breaking Changes
 
