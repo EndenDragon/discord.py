@@ -10,6 +10,12 @@ discord.py is an API wrapper for Discord written in Python.
 
 This was written to allow easier writing of bots or chat logs. Make sure to familiarise yourself with the API using the `documentation <http://discordpy.rtfd.org/en/latest>`__.
 
+Fork Modifications
+------------------
+
+- Webhooks
+   - Add ``webhooks_update(guild, channel)`` event handler
+
 Breaking Changes
 ---------------
 

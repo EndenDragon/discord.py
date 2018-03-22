@@ -597,6 +597,11 @@ class ConnectionState:
         before_emojis = guild.emojis
         guild.emojis = tuple(map(lambda d: self.store_emoji(guild, d), data['emojis']))
         self.dispatch('guild_emojis_update', guild, before_emojis, guild.emojis)
+    
+    def parse_webhooks_update(self, data):
+        guild = self._get_guild(int(data["guild_id"]))
+        channels = self.get_channel(int(data["channel_id"]))
+        self.dispatch("webhooks_update", guild, channel)
 
     def _get_create_guild(self, data):
         if data.get('unavailable') == False:
