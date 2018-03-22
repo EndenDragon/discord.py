@@ -600,7 +600,7 @@ class ConnectionState:
     
     def parse_webhooks_update(self, data):
         guild = self._get_guild(int(data["guild_id"]))
-        channels = self.get_channel(int(data["channel_id"]))
+        channel = self.get_channel(int(data["channel_id"]))
         self.dispatch("webhooks_update", guild, channel)
 
     def _get_create_guild(self, data):
