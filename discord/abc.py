@@ -54,7 +54,7 @@ class Snowflake(metaclass=abc.ABCMeta):
 
     Attributes
     -----------
-    id: int
+    id: :class:`int`
         The model's unique ID.
     """
     __slots__ = ()
@@ -91,13 +91,13 @@ class User(metaclass=abc.ABCMeta):
 
     Attributes
     -----------
-    name: str
+    name: :class:`str`
         The user's username.
-    discriminator: str
+    discriminator: :class:`str`
         The user's discriminator.
-    avatar: Optional[str]
+    avatar: Optional[:class:`str`]
         The avatar hash the user has.
-    bot: bool
+    bot: :class:`bool`
         If the user is a bot account.
     """
     __slots__ = ()
@@ -133,7 +133,7 @@ class User(metaclass=abc.ABCMeta):
 class PrivateChannel(metaclass=abc.ABCMeta):
     """An ABC that details the common operations on a private Discord channel.
 
-    The follow implement this ABC:
+    The following implement this ABC:
 
     - :class:`DMChannel`
     - :class:`GroupChannel`
@@ -165,20 +165,21 @@ _Overwrites = namedtuple('_Overwrites', 'id allow deny type')
 class GuildChannel:
     """An ABC that details the common operations on a Discord guild channel.
 
-    The follow implement this ABC:
+    The following implement this ABC:
 
     - :class:`TextChannel`
     - :class:`VoiceChannel`
+    - :class:`CategoryChannel`
 
     This ABC must also implement :class:`abc.Snowflake`.
 
     Attributes
     -----------
-    name: str
+    name: :class:`str`
         The channel name.
     guild: :class:`Guild`
         The guild the channel belongs to.
-    position: int
+    position: :class:`int`
         The position in the channel list. This is a number that starts at 0.
         e.g. the top channel is position 0.
     """
@@ -188,7 +189,7 @@ class GuildChannel:
         return self.name
 
     @asyncio.coroutine
-    def _move(self, position, *, reason):
+    def _move(self, position, parent_id=None, lock_permissions=False, *, reason):
         if position < 0:
             raise InvalidArgument('Channel position cannot be less than 0.')
 
@@ -211,8 +212,48 @@ class GuildChannel:
             # add ourselves at our designated position
             channels.insert(position, self)
 
-        payload = [{'id': c.id, 'position': index } for index, c in enumerate(channels)]
-        yield from http.move_channel_position(self.guild.id, payload, reason=reason)
+        payload = []
+        for index, c in enumerate(channels):
+            d = {'id': c.id, 'position': index}
+            if parent_id is not _undefined and c.id == self.id:
+                d.update(parent_id=parent_id, lock_permissions=lock_permissions)
+            payload.append(d)
+
+        yield from http.bulk_channel_update(self.guild.id, payload, reason=reason)
+        self.position = position
+        if parent_id is not _undefined:
+            self.category_id = int(parent_id) if parent_id else None
+
+    @asyncio.coroutine
+    def _edit(self, options, reason):
+        try:
+            parent = options.pop('category')
+        except KeyError:
+            parent_id = _undefined
+        else:
+            parent_id = parent and parent.id
+
+        lock_permissions = options.pop('sync_permissions', False)
+
+        try:
+            position = options.pop('position')
+        except KeyError:
+            if parent_id is not _undefined:
+                if lock_permissions:
+                    category = self.guild.get_channel(parent_id)
+                    options['permission_overwrites'] = [c._asdict() for c in category._overwrites]
+                options['parent_id'] = parent_id
+            elif lock_permissions and self.category_id is not None:
+                # if we're syncing permissions on a pre-existing channel category without changing it
+                # we need to update the permissions to point to the pre-existing category
+                category = self.guild.get_channel(self.category_id)
+                options['permission_overwrites'] = [c._asdict() for c in category._overwrites]
+        else:
+            yield from self._move(position, parent_id=parent_id, lock_permissions=lock_permissions, reason=reason)
+
+        if options:
+            data = yield from self._state.http.edit_channel(self.id, reason=reason, **options)
+            self._update(self.guild, data)
 
     def _fill_overwrites(self, data):
         self._overwrites = []
@@ -241,7 +282,7 @@ class GuildChannel:
 
     @property
     def changed_roles(self):
-        """Returns a list of :class:`Roles` that have been overridden from
+        """Returns a :class:`list` of :class:`Roles` that have been overridden from
         their default values in the :attr:`Guild.roles` attribute."""
         ret = []
         for overwrite in filter(lambda o: o.type == 'role', self._overwrites):
@@ -254,13 +295,9 @@ class GuildChannel:
             ret.append(role)
         return ret
 
-    def is_default(self):
-        """bool : Indicates if this is the default channel for the :class:`Guild` it belongs to."""
-        return self.guild.id == self.id
-
     @property
     def mention(self):
-        """str : The string that allows you to mention the channel."""
+        """:class:`str` : The string that allows you to mention the channel."""
         return '<#%s>' % self.id
 
     @property
@@ -326,6 +363,14 @@ class GuildChannel:
             ret.append((target, overwrite))
         return ret
 
+    @property
+    def category(self):
+        """Optional[:class:`CategoryChannel`]: The category this channel belongs to.
+
+        If there is no category then this is ``None``.
+        """
+        return self.guild.get_channel(self.category_id)
+
     def permissions_for(self, member):
         """Handles permission resolution for the current :class:`Member`.
 
@@ -335,7 +380,6 @@ class GuildChannel:
         - Guild roles
         - Channel overrides
         - Member overrides
-        - Whether the channel is the default channel.
 
         Parameters
         ----------
@@ -357,9 +401,7 @@ class GuildChannel:
         # have to take into effect.
         # After all that is done.. you have to do the following:
 
-        # If manage permissions is True, then all permissions are set to
-        # True. If the channel is the default channel then everyone gets
-        # read permissions regardless.
+        # If manage permissions is True, then all permissions are set to True.
 
         # The operation first takes into consideration the denied
         # and then the allowed.
@@ -380,12 +422,23 @@ class GuildChannel:
         if base.administrator:
             return Permissions.all()
 
+        # Apply @everyone allow/deny first since it's special
+        try:
+            maybe_everyone = self._overwrites[0]
+            if maybe_everyone.id == self.guild.id:
+                base.handle_overwrite(allow=maybe_everyone.allow, deny=maybe_everyone.deny)
+                remaining_overwrites = self._overwrites[1:]
+            else:
+                remaining_overwrites = self._overwrites
+        except IndexError:
+            remaining_overwrites = self._overwrites
+
         member_role_ids = set(map(lambda r: r.id, member.roles))
         denies = 0
         allows = 0
 
         # Apply channel specific role permission overwrites
-        for overwrite in self._overwrites:
+        for overwrite in remaining_overwrites:
             if overwrite.type == 'role' and overwrite.id in member_role_ids:
                 denies |= overwrite.deny
                 allows |= overwrite.allow
@@ -393,14 +446,10 @@ class GuildChannel:
         base.handle_overwrite(allow=allows, deny=denies)
 
         # Apply member specific permission overwrites
-        for overwrite in self._overwrites:
+        for overwrite in remaining_overwrites:
             if overwrite.type == 'member' and overwrite.id == member.id:
                 base.handle_overwrite(allow=overwrite.allow, deny=overwrite.deny)
                 break
-
-        # default channels can always be read
-        if self.is_default():
-            base.read_messages = True
 
         # if you can't send a message in a channel then you can't have certain
         # permissions as well
@@ -608,7 +657,7 @@ class GuildChannel:
 class Messageable(metaclass=abc.ABCMeta):
     """An ABC that details the common operations on a model that can send messages.
 
-    The follow implement this ABC:
+    The following implement this ABC:
 
     - :class:`TextChannel`
     - :class:`DMChannel`
@@ -628,7 +677,7 @@ class Messageable(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @asyncio.coroutine
-    def send(self, content=None, *, tts=False, embed=None, file=None, files=None, reason=None, delete_after=None, nonce=None):
+    def send(self, content=None, *, tts=False, embed=None, file=None, files=None, delete_after=None, nonce=None):
         """|coro|
 
         Sends a message to the destination with the content given.
@@ -639,7 +688,7 @@ class Messageable(metaclass=abc.ABCMeta):
 
         To upload a single file, the ``file`` parameter should be used with a
         single :class:`File` object. To upload multiple files, the ``files``
-        parameter should be used with a list of :class:`File` objects.
+        parameter should be used with a :class:`list` of :class:`File` objects.
         **Specifying both parameters will lead to an exception**.
 
         If the ``embed`` parameter is provided, it must be of type :class:`Embed` and
@@ -664,9 +713,6 @@ class Messageable(metaclass=abc.ABCMeta):
             If provided, the number of seconds to wait in the background
             before deleting the message we just sent. If the deletion fails,
             then it is silently ignored.
-        reason: Optional[str]
-            The reason for deleting the message, if necessary.
-            Shows up on the audit log.
 
         Raises
         --------
@@ -723,7 +769,7 @@ class Messageable(metaclass=abc.ABCMeta):
             def delete():
                 yield from asyncio.sleep(delete_after, loop=state.loop)
                 try:
-                    yield from ret.delete(reason=reason)
+                    yield from ret.delete()
                 except:
                     pass
             compat.create_task(delete(), loop=state.loop)
@@ -753,7 +799,7 @@ class Messageable(metaclass=abc.ABCMeta):
 
         Example Usage: ::
 
-            with channel.typing():
+            async with channel.typing():
                 # do expensive stuff here
                 await channel.send('done!')
 
@@ -796,7 +842,7 @@ class Messageable(metaclass=abc.ABCMeta):
     def pins(self):
         """|coro|
 
-        Returns a list of :class:`Message` that are currently pinned.
+        Returns a :class:`list` of :class:`Message` that are currently pinned.
 
         Raises
         -------
@@ -872,7 +918,7 @@ class Messageable(metaclass=abc.ABCMeta):
             iterator = channel.history(limit=200)
             while True:
                 try:
-                    message = yield from iterator.get()
+                    message = yield from iterator.next()
                 except discord.NoMoreItems:
                     break
                 else:
@@ -886,7 +932,7 @@ class Connectable(metaclass=abc.ABCMeta):
     """An ABC that details the common operations on a channel that can
     connect to a voice server.
 
-    The follow implement this ABC:
+    The following implement this ABC:
 
     - :class:`VoiceChannel`
     """

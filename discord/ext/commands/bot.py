@@ -39,12 +39,16 @@ from .errors import CommandNotFound, CommandError
 from .formatter import HelpFormatter
 
 def when_mentioned(bot, msg):
-    """A callable that implements a command prefix equivalent
-    to being mentioned, e.g. ``@bot ``."""
+    """A callable that implements a command prefix equivalent to being mentioned.
+
+    These are meant to be passed into the :attr:`.Bot.command_prefix` attribute.
+    """
     return [bot.user.mention + ' ', '<@!%s> ' % bot.user.id]
 
 def when_mentioned_or(*prefixes):
     """A callable that implements when mentioned or other prefixes provided.
+
+    These are meant to be passed into the :attr:`.Bot.command_prefix` attribute.
 
     Example
     --------
@@ -52,6 +56,19 @@ def when_mentioned_or(*prefixes):
     .. code-block:: python3
 
         bot = commands.Bot(command_prefix=commands.when_mentioned_or('!'))
+
+
+    .. note::
+
+        This callable returns another callable, so if this is done inside a custom
+        callable, you must call the returned callable, for example:
+
+        .. code-block:: python3
+
+            async def get_prefix(bot, message):
+                extras = await prefixes_for(message.guild) # returns a list
+                return commands.when_mentioned_or(*extras)(bot, message)
+
 
     See Also
     ----------
@@ -70,6 +87,9 @@ _mentions_transforms = {
 }
 
 _mention_pattern = re.compile('|'.join(_mentions_transforms.keys()))
+
+def _is_submodule(parent, child):
+    return parent == child or child.startswith(parent + ".")
 
 @asyncio.coroutine
 def _default_help_command(ctx, *commands : str):
@@ -148,7 +168,6 @@ class BotBase(GroupMixin):
             self._skip_check = lambda x, y: x == y
 
         self.help_attrs = options.pop('help_attrs', {})
-        self.help_attrs['pass_context'] = True
 
         if 'name' not in self.help_attrs:
             self.help_attrs['name'] = 'help'
@@ -256,7 +275,7 @@ class BotBase(GroupMixin):
             The function that was used as a global check.
         call_once: bool
             If the function should only be called once per
-            :meth:`.invoke` call.
+            :meth:`.Command.invoke` call.
         """
 
         if call_once:
@@ -288,7 +307,7 @@ class BotBase(GroupMixin):
         """A decorator that adds a "call once" global check to the bot.
 
         Unlike regular global checks, this one is called only once
-        per :meth:`.invoke` call.
+        per :meth:`.Command.invoke` call.
 
         Regular global checks are called whenever a command is called
         or :meth:`.Command.can_run` is called. This type of check
@@ -417,7 +436,7 @@ class BotBase(GroupMixin):
 
         Parameters
         -----------
-        func : coroutine
+        func : :ref:`coroutine <coroutine>`
             The extra event to listen to.
         name : Optional[str]
             The name of the command to use. Defaults to ``func.__name__``.
@@ -594,8 +613,7 @@ class BotBase(GroupMixin):
         All registered commands and event listeners that the
         cog has registered will be removed as well.
 
-        If no cog is found then ``None`` is returned, otherwise
-        the cog instance that is being removed is returned.
+        If no cog is found then this method has no effect.
 
         If the cog defines a special member function named ``__unload``
         then it is called when removal has completed. This function
@@ -609,7 +627,7 @@ class BotBase(GroupMixin):
 
         cog = self.cogs.pop(name, None)
         if cog is None:
-            return cog
+            return
 
         members = inspect.getmembers(cog)
         for name, member in members:
@@ -715,12 +733,12 @@ class BotBase(GroupMixin):
 
         # remove the cogs registered from the module
         for cogname, cog in self.cogs.copy().items():
-            if cog.__module__.startswith(lib_name):
+            if _is_submodule(lib_name, cog.__module__):
                 self.remove_cog(cogname)
 
         # first remove all the commands from the module
         for cmd in self.all_commands.copy().values():
-            if cmd.module.startswith(lib_name):
+            if _is_submodule(lib_name, cmd.module):
                 if isinstance(cmd, GroupMixin):
                     cmd.recursively_remove_all_commands()
                 self.remove_command(cmd.name)
@@ -729,7 +747,7 @@ class BotBase(GroupMixin):
         for event_list in self.extra_events.copy().values():
             remove = []
             for index, event in enumerate(event_list):
-                if event.__module__.startswith(lib_name):
+                if _is_submodule(lib_name, event.__module__):
                     remove.append(index)
 
             for index in reversed(remove):
@@ -749,6 +767,9 @@ class BotBase(GroupMixin):
             del lib
             del self.extensions[name]
             del sys.modules[name]
+            for module in list(sys.modules.keys()):
+                if _is_submodule(lib_name, module):
+                    del sys.modules[module]
 
     # command processing
 
@@ -764,20 +785,33 @@ class BotBase(GroupMixin):
         message: :class:`discord.Message`
             The message context to get the prefix of.
 
+        Raises
+        --------
+        :exc:`.ClientException`
+            The prefix was invalid. This could be if the prefix
+            function returned None, the prefix list returned no
+            elements that aren't None, or the prefix string is
+            empty.
+
         Returns
         --------
         Union[List[str], str]
             A list of prefixes or a single prefix that the bot is
             listening for.
         """
-        prefix = self.command_prefix
+        prefix = ret = self.command_prefix
         if callable(prefix):
             ret = prefix(self, message)
             if asyncio.iscoroutine(ret):
                 ret = yield from ret
-            return ret
-        else:
-            return prefix
+
+        if isinstance(ret, (list, tuple)):
+            ret = [p for p in ret if p]
+
+        if not ret:
+            raise discord.ClientException('invalid prefix (could be an empty string, empty list, or None)')
+
+        return ret
 
     @asyncio.coroutine
     def get_context(self, message, *, cls=Context):
@@ -819,7 +853,7 @@ class BotBase(GroupMixin):
         prefix = yield from self.get_prefix(message)
         invoked_prefix = prefix
 
-        if not isinstance(prefix, (tuple, list)):
+        if isinstance(prefix, str):
             if not view.skip_string(prefix):
                 return ctx
         else:
@@ -909,45 +943,49 @@ class Bot(BotBase, discord.Client):
         command prefixes. This callable can be either a regular function or
         a coroutine.
 
-        The command prefix could also be a list or a tuple indicating that
+        The command prefix could also be a :class:`list` or a :class:`tuple` indicating that
         multiple checks for the prefix should be used and the first one to
         match will be the invocation prefix. You can get this prefix via
         :attr:`.Context.prefix`.
-    description : str
+    case_insensitive: :class:`bool`
+        Whether the commands should be case insensitive. Defaults to ``False``. This
+        attribute does not carry over to groups. You must set it to every group if
+        you require group commands to be case insensitive as well.
+    description : :class:`str`
         The content prefixed into the default help message.
-    self_bot : bool
+    self_bot : :class:`bool`
         If ``True``, the bot will only listen to commands invoked by itself rather
         than ignoring itself. If ``False`` (the default) then the bot will ignore
         itself. This cannot be changed once initialised.
     formatter : :class:`.HelpFormatter`
-        The formatter used to format the help message. By default, it uses a
+        The formatter used to format the help message. By default, it uses
         the :class:`.HelpFormatter`. Check it for more info on how to override it.
         If you want to change the help command completely (add aliases, etc) then
         a call to :meth:`~.Bot.remove_command` with 'help' as the argument would do the
         trick.
-    pm_help : Optional[bool]
+    pm_help : Optional[:class:`bool`]
         A tribool that indicates if the help command should PM the user instead of
         sending it to the channel it received it from. If the boolean is set to
         ``True``, then all help output is PM'd. If ``False``, none of the help
         output is PM'd. If ``None``, then the bot will only PM when the help
         message becomes too long (dictated by more than 1000 characters).
         Defaults to ``False``.
-    help_attrs : dict
+    help_attrs : :class:`dict`
         A dictionary of options to pass in for the construction of the help command.
         This allows you to change the command behaviour without actually changing
         the implementation of the command. The attributes will be the same as the
         ones passed in the :class:`.Command` constructor. Note that ``pass_context``
         will always be set to ``True`` regardless of what you pass in.
-    command_not_found : str
+    command_not_found : :class:`str`
         The format string used when the help command is invoked with a command that
         is not found. Useful for i18n. Defaults to ``"No command called {} found."``.
         The only format argument is the name of the command passed.
-    command_has_no_subcommands : str
+    command_has_no_subcommands : :class:`str`
         The format string used when the help command is invoked with requests for a
         subcommand but the command does not have any subcommands. Defaults to
         ``"Command {0.name} has no subcommands."``. The first format argument is the
         :class:`.Command` attempted to get a subcommand and the second is the name.
-    owner_id: Optional[int]
+    owner_id: Optional[:class:`int`]
         The ID that owns the bot. If this is not set and is then queried via
         :meth:`.is_owner` then it is fetched automatically using
         :meth:`~.Bot.application_info`.

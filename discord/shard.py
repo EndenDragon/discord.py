@@ -28,7 +28,7 @@ from .state import AutoShardedConnectionState
 from .client import Client
 from .gateway import *
 from .errors import ClientException, InvalidArgument
-from . import compat
+from . import compat, utils
 from .enums import Status
 
 import asyncio
@@ -45,10 +45,31 @@ class Shard:
         self.loop = self._client.loop
         self._current = compat.create_future(self.loop)
         self._current.set_result(None) # we just need an already done future
+        self._pending = asyncio.Event(loop=self.loop)
+        self._pending_task = None
 
     @property
     def id(self):
         return self.ws.shard_id
+
+    def is_pending(self):
+        return not self._pending.is_set()
+
+    def complete_pending_reads(self):
+        self._pending.set()
+
+    def _pending_reads(self):
+        try:
+            while self.is_pending():
+                yield from self.poll()
+        except asyncio.CancelledError:
+            pass
+
+    def launch_pending_reads(self):
+        self._pending_task = compat.create_task(self._pending_reads(), loop=self.loop)
+
+    def wait(self):
+        return self._pending_task
 
     @asyncio.coroutine
     def poll(self):
@@ -101,7 +122,7 @@ class AutoShardedClient(Client):
 
     Attributes
     ------------
-    shard_ids: Optional[List[int]]
+    shard_ids: Optional[List[:class:`int`]]
         An optional list of shard_ids to launch the shards with.
     """
     def __init__(self, *args, loop=None, **kwargs):
@@ -127,7 +148,6 @@ class AutoShardedClient(Client):
             return self.shards[i].ws
 
         self._connection._get_websocket = _get_websocket
-        self._still_sharding = True
 
     @asyncio.coroutine
     def _chunker(self, guild, *, shard_id=None):
@@ -148,6 +168,26 @@ class AutoShardedClient(Client):
 
         ws = self.shards[shard_id].ws
         yield from ws.send_as_json(payload)
+
+    @property
+    def latency(self):
+        """:class:`float`: Measures latency between a HEARTBEAT and a HEARTBEAT_ACK in seconds.
+
+        This operates similarly to :meth:`.Client.latency` except it uses the average
+        latency of every shard's latency. To get a list of shard latency, check the
+        :attr:`latencies` property. Returns ``nan`` if there are no shards ready.
+        """
+        if not self.shards:
+            return float('nan')
+        return sum(latency for _, latency in self.latencies) / len(self.shards)
+
+    @property
+    def latencies(self):
+        """List[Tuple[:class:`int`, :class:`float`]]: A list of latencies between a HEARTBEAT and a HEARTBEAT_ACK in seconds.
+
+        This returns a list of tuples with elements ``(shard_id, latency)``.
+        """
+        return [(shard_id, shard.ws.latency) for shard_id, shard in self.shards.items()]
 
     @asyncio.coroutine
     def request_offline_members(self, *guilds):
@@ -182,14 +222,6 @@ class AutoShardedClient(Client):
             yield from self._connection.request_offline_members(sub_guilds, shard_id=shard_id)
 
     @asyncio.coroutine
-    def pending_reads(self, shard):
-        try:
-            while self._still_sharding:
-                yield from shard.poll()
-        except asyncio.CancelledError:
-            pass
-
-    @asyncio.coroutine
     def launch_shard(self, gateway, shard_id):
         try:
             ws = yield from asyncio.wait_for(_ensure_coroutine_connect(gateway, self.loop), loop=self.loop, timeout=180.0)
@@ -204,6 +236,7 @@ class AutoShardedClient(Client):
         ws.gateway = gateway
         ws.shard_id = shard_id
         ws.shard_count = self.shard_count
+        ws._max_heartbeat_timeout = self._connection.heartbeat_timeout
 
         try:
             # OP HELLO
@@ -216,7 +249,7 @@ class AutoShardedClient(Client):
 
         # keep reading the shard while others connect
         self.shards[shard_id] = ret = Shard(ws, self)
-        compat.create_task(self.pending_reads(ret), loop=self.loop)
+        ret.launch_pending_reads()
         yield from asyncio.sleep(5.0, loop=self.loop)
 
     @asyncio.coroutine
@@ -233,7 +266,13 @@ class AutoShardedClient(Client):
         for shard_id in shard_ids:
             yield from self.launch_shard(gateway, shard_id)
 
-        self._still_sharding = False
+        shards_to_wait_for = []
+        for shard in self.shards.values():
+            shard.complete_pending_reads()
+            shards_to_wait_for.append(shard.wait())
+
+        # wait for all pending tasks to finish
+        yield from utils.sane_wait_for(shards_to_wait_for, timeout=300.0, loop=self.loop)
 
     @asyncio.coroutine
     def _connect(self):
@@ -268,18 +307,24 @@ class AutoShardedClient(Client):
         yield from self.http.close()
 
     @asyncio.coroutine
-    def change_presence(self, *, game=None, status=None, afk=False, shard_id=None):
+    def change_presence(self, *, activity=None, status=None, afk=False, shard_id=None):
         """|coro|
 
         Changes the client's presence.
 
-        The game parameter is a Game object (not a string) that represents
-        a game being played currently.
+        The activity parameter is a :class:`Activity` object (not a string) that represents
+        the activity being done currently. This could also be the slimmed down versions,
+        :class:`Game` and :class:`Streaming`.
+
+        Example: ::
+
+            game = discord.Game("with the API")
+            await client.change_presence(status=discord.Status.idle, activity=game)
 
         Parameters
         ----------
-        game: Optional[:class:`Game`]
-            The game being played. None if no game is being played.
+        activity: Optional[Union[:class:`Game`, :class:`Streaming`, :class:`Activity`]]
+            The activity being done. ``None`` if no currently active activity is done.
         status: Optional[:class:`Status`]
             Indicates what status to change to. If None, then
             :attr:`Status.online` is used.
@@ -295,7 +340,7 @@ class AutoShardedClient(Client):
         Raises
         ------
         InvalidArgument
-            If the ``game`` parameter is not :class:`Game` or None.
+            If the ``activity`` parameter is not of proper type.
         """
 
         if status is None:
@@ -310,12 +355,12 @@ class AutoShardedClient(Client):
 
         if shard_id is None:
             for shard in self.shards.values():
-                yield from shard.ws.change_presence(game=game, status=status, afk=afk)
+                yield from shard.ws.change_presence(activity=activity, status=status, afk=afk)
 
             guilds = self._connection.guilds
         else:
             shard = self.shards[shard_id]
-            yield from shard.ws.change_presence(game=game, status=status, afk=afk)
+            yield from shard.ws.change_presence(activity=activity, status=status, afk=afk)
             guilds = [g for g in self._connection.guilds if g.shard_id == shard_id]
 
         for guild in guilds:
@@ -323,5 +368,5 @@ class AutoShardedClient(Client):
             if me is None:
                 continue
 
-            me.game = game
+            me.activity = activity
             me.status = status_enum

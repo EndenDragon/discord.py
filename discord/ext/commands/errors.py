@@ -29,7 +29,8 @@ from discord.errors import DiscordException
 __all__ = [ 'CommandError', 'MissingRequiredArgument', 'BadArgument',
            'NoPrivateMessage', 'CheckFailure', 'CommandNotFound',
            'DisabledCommand', 'CommandInvokeError', 'TooManyArguments',
-           'UserInputError', 'CommandOnCooldown', 'NotOwner' ]
+           'UserInputError', 'CommandOnCooldown', 'NotOwner',
+           'MissingPermissions', 'BotMissingPermissions']
 
 class CommandError(DiscordException):
     """The base exception type for all command related errors.
@@ -71,11 +72,11 @@ class MissingRequiredArgument(UserInputError):
 
     Attributes
     -----------
-    param: str
+    param: :class:`inspect.Parameter`
         The argument that is missing.
     """
     def __init__(self, param):
-        self.param = param.name
+        self.param = param
         super().__init__('{0.name} is a required argument that is missing.'.format(param))
 
 class TooManyArguments(UserInputError):
@@ -129,10 +130,51 @@ class CommandOnCooldown(CommandError):
     cooldown: Cooldown
         A class with attributes ``rate``, ``per``, and ``type`` similar to
         the :func:`.cooldown` decorator.
-    retry_after: float
+    retry_after: :class:`float`
         The amount of seconds to wait before you can retry again.
     """
     def __init__(self, cooldown, retry_after):
         self.cooldown = cooldown
         self.retry_after = retry_after
         super().__init__('You are on cooldown. Try again in {:.2f}s'.format(retry_after))
+
+class MissingPermissions(CheckFailure):
+    """Exception raised when the command invoker lacks permissions to run
+    command.
+
+    Attributes
+    -----------
+    missing_perms: :class:`list`
+        The required permissions that are missing.
+    """
+    def __init__(self, missing_perms, *args):
+        self.missing_perms = missing_perms
+
+        missing = [perm.replace('_', ' ').replace('guild', 'server').title() for perm in missing_perms]
+
+        if len(missing) > 2:
+            fmt =  '{}, and {}'.format(", ".join(missing[:-1]), missing[-1])
+        else:
+            fmt = ' and '.join(missing)
+        message = 'You are missing {} permission(s) to run command.'.format(fmt)
+        super().__init__(message, *args)
+
+class BotMissingPermissions(CheckFailure):
+    """Exception raised when the bot lacks permissions to run command.
+
+    Attributes
+    -----------
+    missing_perms: :class:`list`
+        The required permissions that are missing.
+    """
+    def __init__(self, missing_perms, *args):
+        self.missing_perms = missing_perms
+
+        missing = [perm.replace('_', ' ').replace('guild', 'server').title() for perm in missing_perms]
+
+        if len(missing) > 2:
+            fmt =  '{}, and {}'.format(", ".join(missing[:-1]), missing[-1])
+        else:
+            fmt = ' and '.join(missing)
+        message = 'Bot requires {} permission(s) to run command.'.format(fmt)
+        super().__init__(message, *args)

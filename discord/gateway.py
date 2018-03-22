@@ -30,7 +30,7 @@ import websockets
 import asyncio
 
 from . import utils, compat
-from .game import Game
+from .activity import create_activity, _ActivityTag
 from .errors import ConnectionClosed, InvalidArgument
 import logging
 import zlib, json
@@ -62,13 +62,15 @@ class KeepAliveHandler(threading.Thread):
         self.shard_id = shard_id
         self.msg = 'Keeping websocket alive with sequence %s.'
         self._stop_ev = threading.Event()
-        self._last_ack = time.time()
+        self._last_ack = time.monotonic()
+        self._last_send = time.monotonic()
+        self.heartbeat_timeout = ws._max_heartbeat_timeout
 
     def run(self):
         while not self._stop_ev.wait(self.interval):
-            if self._last_ack + 2 * self.interval < time.time():
+            if self._last_ack + self.heartbeat_timeout < time.monotonic():
                 log.warn("Shard ID %s has stopped responding to the gateway. Closing and restarting." % self.shard_id)
-                coro = self.ws.close(1006)
+                coro = self.ws.close(4000)
                 f = compat.run_coroutine_threadsafe(coro, loop=self.ws.loop)
 
                 try:
@@ -88,6 +90,8 @@ class KeepAliveHandler(threading.Thread):
                 f.result()
             except Exception:
                 self.stop()
+            else:
+                self._last_send = time.monotonic()
 
     def get_payload(self):
         return {
@@ -99,7 +103,7 @@ class KeepAliveHandler(threading.Thread):
         self._stop_ev.set()
 
     def ack(self):
-        self._last_ack = time.time()
+        self._last_ack = time.monotonic()
 
 class VoiceKeepAliveHandler(KeepAliveHandler):
     def __init__(self, *args, **kwargs):
@@ -182,6 +186,8 @@ class DiscordWebSocket(websockets.client.WebSocketClientProtocol):
         # ws related stuff
         self.session_id = None
         self.sequence = None
+        self._zlib = zlib.decompressobj()
+        self._buffer = bytearray()
 
     @classmethod
     @asyncio.coroutine
@@ -202,6 +208,7 @@ class DiscordWebSocket(websockets.client.WebSocketClientProtocol):
         ws.shard_count = client._connection.shard_count
         ws.session_id = session
         ws.sequence = sequence
+        ws._max_heartbeat_timeout = client._connection.heartbeat_timeout
 
         client._connection._update_references(ws)
 
@@ -276,10 +283,10 @@ class DiscordWebSocket(websockets.client.WebSocketClientProtocol):
             payload['d']['shard'] = [self.shard_id, self.shard_count]
 
         state = self._connection
-        if state._game is not None or state._status is not None:
+        if state._activity is not None or state._status is not None:
             payload['d']['presence'] = {
                 'status': state._status,
-                'game': state._game,
+                'game': state._activity,
                 'since': 0,
                 'afk': False
             }
@@ -307,8 +314,17 @@ class DiscordWebSocket(websockets.client.WebSocketClientProtocol):
         self._dispatch('socket_raw_receive', msg)
 
         if isinstance(msg, bytes):
-            msg = zlib.decompress(msg, 15, 10490000) # This is 10 MiB
-            msg = msg.decode('utf-8')
+            self._buffer.extend(msg)
+
+            if len(msg) >= 4:
+                if msg[-4:] == b'\x00\x00\xff\xff':
+                    msg = self._zlib.decompress(self._buffer)
+                    msg = msg.decode('utf-8')
+                    self._buffer = bytearray()
+                else:
+                    return
+            else:
+                return
 
         msg = json.loads(msg)
 
@@ -341,6 +357,8 @@ class DiscordWebSocket(websockets.client.WebSocketClientProtocol):
         if op == self.HELLO:
             interval = data['heartbeat_interval'] / 1000.0
             self._keep_alive = KeepAliveHandler(ws=self, interval=interval, shard_id=self.shard_id)
+            # send a heartbeat immediately
+            yield from self.send_as_json(self._keep_alive.get_payload())
             self._keep_alive.start()
             return
 
@@ -408,6 +426,12 @@ class DiscordWebSocket(websockets.client.WebSocketClientProtocol):
         for index in reversed(removed):
             del self._dispatch_listeners[index]
 
+    @property
+    def latency(self):
+        """:obj:`float`: Measures latency between a HEARTBEAT and a HEARTBEAT_ACK in seconds."""
+        heartbeat = self._keep_alive
+        return float('inf') if heartbeat is None else heartbeat._last_ack - heartbeat._last_send
+
     def _can_handle_close(self, code):
         return code not in (1000, 4004, 4010, 4011)
 
@@ -445,19 +469,19 @@ class DiscordWebSocket(websockets.client.WebSocketClientProtocol):
                 raise ConnectionClosed(e, shard_id=self.shard_id) from e
 
     @asyncio.coroutine
-    def change_presence(self, *, game=None, status=None, afk=False, since=0.0):
-        if game is not None and not isinstance(game, Game):
-            raise InvalidArgument('game must be of type Game or None')
+    def change_presence(self, *, activity=None, status=None, afk=False, since=0.0):
+        if activity is not None:
+            if not isinstance(activity, _ActivityTag):
+                raise InvalidArgument('activity must be one of Game, Streaming, or Activity.')
+            activity = activity.to_dict()
 
         if status == 'idle':
             since = int(time.time() * 1000)
 
-        sent_game = dict(game) if game else None
-
         payload = {
             'op': self.PRESENCE,
             'd': {
-                'game': sent_game,
+                'game': activity,
                 'afk': afk,
                 'since': since,
                 'status': status
@@ -492,11 +516,11 @@ class DiscordWebSocket(websockets.client.WebSocketClientProtocol):
         yield from self.send_as_json(payload)
 
     @asyncio.coroutine
-    def close_connection(self, force=False):
+    def close_connection(self, *args, **kwargs):
         if self._keep_alive:
             self._keep_alive.stop()
 
-        yield from super().close_connection(force=force)
+        yield from super().close_connection(*args, **kwargs)
 
 class DiscordVoiceWebSocket(websockets.client.WebSocketClientProtocol):
     """Implements the websocket protocol for handling voice connections.
@@ -581,6 +605,7 @@ class DiscordVoiceWebSocket(websockets.client.WebSocketClientProtocol):
         ws = yield from websockets.connect(gateway, loop=client.loop, klass=cls)
         ws.gateway = gateway
         ws._connection = client
+        ws._max_heartbeat_timeout = 60.0
 
         if resume:
             yield from ws.resume()
@@ -676,10 +701,10 @@ class DiscordVoiceWebSocket(websockets.client.WebSocketClientProtocol):
             raise ConnectionClosed(e, shard_id=None) from e
 
     @asyncio.coroutine
-    def close_connection(self, force=False):
+    def close_connection(self, *args, **kwargs):
         if self._keep_alive:
             self._keep_alive.stop()
 
-        yield from super().close_connection(force=force)
+        yield from super().close_connection(*args, **kwargs)
 
 

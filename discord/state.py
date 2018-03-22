@@ -25,8 +25,9 @@ DEALINGS IN THE SOFTWARE.
 """
 
 from .guild import Guild
+from .activity import _ActivityTag
 from .user import User, ClientUser
-from .emoji import Emoji, PartialReactionEmoji
+from .emoji import Emoji, PartialEmoji
 from .message import Message
 from .relationship import Relationship
 from .channel import *
@@ -37,7 +38,7 @@ from .calls import GroupCall
 from . import utils, compat
 from .embeds import Embed
 
-from collections import deque, namedtuple
+from collections import deque, namedtuple, OrderedDict
 import copy, enum, math
 import datetime
 import asyncio
@@ -64,11 +65,15 @@ class ConnectionState:
         self.shard_count = None
         self._ready_task = None
         self._fetch_offline = options.get('fetch_offline_members', True)
+        self.heartbeat_timeout = options.get('heartbeat_timeout', 60.0)
         self._listeners = []
 
-        game = options.get('game', None)
-        if game:
-            game = dict(game)
+        activity = options.get('activity', None)
+        if activity:
+            if not isinstance(activity, _ActivityTag):
+                raise TypeError('activity parameter must be one of Game, Streaming, or Activity.')
+
+            activity = activity.to_dict()
 
         status = options.get('status', None)
         if status:
@@ -77,7 +82,7 @@ class ConnectionState:
             else:
                 status = str(status)
 
-        self._game = game
+        self._activity = activity
         self._status = status
 
         self.clear()
@@ -89,7 +94,9 @@ class ConnectionState:
         self._calls = {}
         self._guilds = {}
         self._voice_clients = {}
-        self._private_channels = {}
+
+        # LRU of max size 128
+        self._private_channels = OrderedDict()
         # extra dict to look up private channels by user id
         self._private_channels_by_user = {}
         self._messages = deque(maxlen=self.max_messages)
@@ -148,7 +155,9 @@ class ConnectionState:
         try:
             return self._users[user_id]
         except KeyError:
-            self._users[user_id] = user = User(state=self, data=data)
+            user = User(state=self, data=data)
+            if user.discriminator != '0000':
+                self._users[user_id] = user
             return user
 
     def get_user(self, id):
@@ -189,13 +198,26 @@ class ConnectionState:
         return list(self._private_channels.values())
 
     def _get_private_channel(self, channel_id):
-        return self._private_channels.get(channel_id)
+        try:
+            value = self._private_channels[channel_id]
+        except KeyError:
+            return None
+        else:
+            self._private_channels.move_to_end(channel_id)
+            return value
 
     def _get_private_channel_by_user(self, user_id):
         return self._private_channels_by_user.get(user_id)
 
     def _add_private_channel(self, channel):
-        self._private_channels[channel.id] = channel
+        channel_id = channel.id
+        self._private_channels[channel_id] = channel
+
+        if len(self._private_channels) > 128:
+            _, to_remove = self._private_channels.popitem(last=False)
+            if isinstance(to_remove, DMChannel):
+                self._private_channels_by_user.pop(to_remove.recipient.id, None)
+
         if isinstance(channel, DMChannel):
             self._private_channels_by_user[channel.recipient.id] = channel
 
@@ -356,7 +378,7 @@ class ConnectionState:
 
         emoji_data = data['emoji']
         emoji_id = utils._get_as_snowflake(emoji_data, 'id')
-        emoji = PartialReactionEmoji(id=emoji_id, name=emoji_data['name'])
+        emoji = PartialEmoji(animated=emoji_data['animated'], id=emoji_id, name=emoji_data['name'])
         self.dispatch('raw_reaction_add', emoji, message_id, channel_id, user_id)
 
         # rich interface here
@@ -386,7 +408,7 @@ class ConnectionState:
 
         emoji_data = data['emoji']
         emoji_id = utils._get_as_snowflake(emoji_data, 'id')
-        emoji = PartialReactionEmoji(id=emoji_id, name=emoji_data['name'])
+        emoji = PartialEmoji(animated=emoji_data['animated'], id=emoji_id, name=emoji_data['name'])
         self.dispatch('raw_reaction_remove', emoji, message_id, channel_id, user_id)
 
         message = self._get_message(message_id)
@@ -468,11 +490,18 @@ class ConnectionState:
 
     def parse_channel_create(self, data):
         factory, ch_type = _channel_factory(data['type'])
+        if factory is None:
+            log.warning('CHANNEL_CREATE referencing an unknown channel type %s. Discarding.', data['type'])
+            return
+
         channel = None
+
         if ch_type in (ChannelType.group, ChannelType.private):
-            channel = factory(me=self.user, data=data, state=self)
-            self._add_private_channel(channel)
-            self.dispatch('private_channel_create', channel)
+            channel_id = int(data['id'])
+            if self._get_private_channel(channel_id) is None:
+                channel = factory(me=self.user, data=data, state=self)
+                self._add_private_channel(channel)
+                self.dispatch('private_channel_create', channel)
         else:
             guild_id = utils._get_as_snowflake(data, 'guild_id')
             guild = self._get_guild(guild_id)
@@ -823,7 +852,7 @@ class ConnectionState:
         try:
             return self._emojis[emoji_id]
         except KeyError:
-            return PartialReactionEmoji(id=emoji_id, name=data['name'])
+            return PartialEmoji(animated=data['animated'], id=emoji_id, name=data['name'])
 
     def _upgrade_partial_emoji(self, emoji):
         emoji_id = emoji.id
@@ -888,7 +917,6 @@ class AutoShardedConnectionState(ConnectionState):
             # until the last GUILD_CREATE was sent
             launch.set()
             yield from asyncio.sleep(2.0 * self.shard_count, loop=self.loop)
-
 
         if self._fetch_offline:
             guilds = sorted(self._ready_state.guilds, key=lambda g: g.shard_id)

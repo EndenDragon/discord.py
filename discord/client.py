@@ -31,11 +31,13 @@ from .guild import Guild
 from .errors import *
 from .enums import Status, VoiceRegion
 from .gateway import *
+from .activity import _ActivityTag, create_activity
 from .voice_client import VoiceClient
 from .http import HTTPClient
 from .state import ConnectionState
 from . import utils, compat
 from .backoff import ExponentialBackoff
+from .webhook import Webhook
 
 import asyncio
 import aiohttp
@@ -71,8 +73,8 @@ class Client:
     .. _ProxyConnector: http://aiohttp.readthedocs.org/en/stable/client_reference.html#proxyconnector
 
     Parameters
-    ----------
-    max_messages : Optional[int]
+    -----------
+    max_messages : Optional[:class:`int`]
         The maximum number of messages to store in the internal message cache.
         This defaults to 5000. Passing in `None` or a value less than 100
         will use the default instead of the passed in value.
@@ -80,21 +82,29 @@ class Client:
         The `event loop`_ to use for asynchronous operations. Defaults to ``None``,
         in which case the default event loop is used via ``asyncio.get_event_loop()``.
     connector : aiohttp.BaseConnector
-        The `connector`_ to use for connection pooling. Useful for proxies, e.g.
-        with a `ProxyConnector`_.
-    shard_id : Optional[int]
+        The `connector`_ to use for connection pooling.
+    proxy : Optional[:class:`str`]
+        Proxy URL.
+    proxy_auth : Optional[aiohttp.BasicAuth]
+        An object that represents proxy HTTP Basic Authorization.
+    shard_id : Optional[:class:`int`]
         Integer starting at 0 and less than shard_count.
-    shard_count : Optional[int]
+    shard_count : Optional[:class:`int`]
         The total number of shards.
-    fetch_offline_members: bool
+    fetch_offline_members: :class:`bool`
         Indicates if :func:`on_ready` should be delayed to fetch all offline
         members from the guilds the bot belongs to. If this is ``False``\, then
         no offline members are received and :meth:`request_offline_members`
         must be used to fetch the offline members of the guild.
-    game: Optional[:class:`Game`]
-        A game to start your presence with upon logging on to Discord.
     status: Optional[:class:`Status`]
         A status to start your presence with upon logging on to Discord.
+    activity: Optional[Union[:class:`Activity`, :class:`Game`, :class:`Streaming`]]
+        An activity to start your presence with upon logging on to Discord.
+    heartbeat_timeout: :class:`float`
+        The maximum numbers of seconds before timing out and restarting the
+        WebSocket in the case of not receiving a HEARTBEAT_ACK. Useful if
+        processing the initial packets take too long to the point of disconnecting
+        you. The default timeout is 60 seconds.
 
     Attributes
     -----------
@@ -111,7 +121,9 @@ class Client:
         self.shard_count = options.get('shard_count')
 
         connector = options.pop('connector', None)
-        self.http = HTTPClient(connector, loop=self.loop)
+        proxy = options.pop('proxy', None)
+        proxy_auth = options.pop('proxy_auth', None)
+        self.http = HTTPClient(connector, proxy=proxy, proxy_auth=proxy_auth, loop=self.loop)
 
         self._connection = ConnectionState(dispatch=self.dispatch, chunker=self._chunker,
                                            syncer=self._syncer, http=self.http, loop=self.loop, **options)
@@ -163,6 +175,15 @@ class Client:
         return invite
 
     @property
+    def latency(self):
+        """:obj:`float`: Measures latency between a HEARTBEAT and a HEARTBEAT_ACK in seconds.
+
+        This could be referred to as the Discord WebSocket protocol latency.
+        """
+        ws = self.ws
+        return float('nan') if not ws else ws.latency
+
+    @property
     def user(self):
         """Optional[:class:`ClientUser`]: Represents the connected client. None if not logged in."""
         return self._connection.user
@@ -179,7 +200,13 @@ class Client:
 
     @property
     def private_channels(self):
-        """List[:class:`abc.PrivateChannel`]: The private channels that the connected client is participating on."""
+        """List[:class:`abc.PrivateChannel`]: The private channels that the connected client is participating on.
+
+        .. note::
+
+            This returns only up to 128 most recent private channels due to an internal working
+            on how Discord deals with private channels.
+        """
         return self._connection.private_channels
 
     @property
@@ -188,7 +215,7 @@ class Client:
         return self._connection.voice_clients
 
     def is_ready(self):
-        """bool: Specifies if the client's internal cache is ready for use."""
+        """:obj:`bool`: Specifies if the client's internal cache is ready for use."""
         return self._ready.is_set()
 
     @asyncio.coroutine
@@ -390,6 +417,9 @@ class Client:
 
                 if not reconnect:
                     yield from self.close()
+                    if isinstance(e, ConnectionClosed) and e.code == 1000:
+                        # clean close, don't re-raise this
+                        return
                     raise
 
                 if self.is_closed():
@@ -432,6 +462,18 @@ class Client:
 
         yield from self.http.close()
         self._ready.clear()
+
+    def clear(self):
+        """Clears the internal state of the bot.
+
+        After this, the bot can be considered "re-opened", i.e. :meth:`.is_closed`
+        and :meth:`.is_ready` both return ``False`` along with the bot's internal
+        cache cleared.
+        """
+        self._closed.clear()
+        self._ready.clear()
+        self._connection.clear()
+        self.http.recreate()
 
     @asyncio.coroutine
     def start(self, *args, **kwargs):
@@ -540,14 +582,28 @@ class Client:
     # properties
 
     def is_closed(self):
-        """bool: Indicates if the websocket connection is closed."""
+        """:obj:`bool`: Indicates if the websocket connection is closed."""
         return self._closed.is_set()
+
+    @property
+    def activity(self):
+        """Optional[Union[:class:`Activity`, :class:`Game`, :class:`Streaming`]]: The activity being used upon logging in."""
+        return create_activity(self._connection._activity)
+
+    @activity.setter
+    def activity(self, value):
+        if value is None:
+            self._connection._activity = None
+        elif isinstance(value, _ActivityTag):
+            self._connection._activity = value.to_dict()
+        else:
+            raise TypeError('activity must be one of Game, Streaming, or Activity.')
 
     # helpers/getters
 
     @property
     def users(self):
-        """Returns a list of all the :class:`User` the bot can see."""
+        """Returns a :obj:`list` of all the :class:`User` the bot can see."""
         return list(self._connection._users.values())
 
     def get_channel(self, id):
@@ -622,19 +678,17 @@ class Client:
         or to react to a message, or to edit a message in a self-contained
         way.
 
-        The ``timeout`` parameter is passed onto `asyncio.wait_for`_. By default,
+        The ``timeout`` parameter is passed onto :func:`asyncio.wait_for`. By default,
         it does not timeout. Note that this does propagate the
-        ``asyncio.TimeoutError`` for you in case of timeout and is provided for
+        :exc:`asyncio.TimeoutError` for you in case of timeout and is provided for
         ease of use.
 
-        In case the event returns multiple arguments, a tuple containing those
+        In case the event returns multiple arguments, a :obj:`tuple` containing those
         arguments is returned instead. Please check the
         :ref:`documentation <discord-api-events>` for a list of events and their
         parameters.
 
         This function returns the **first event that meets the requirements**.
-
-        .. _asyncio.wait_for: https://docs.python.org/3/library/asyncio-task.html#asyncio.wait_for
 
         Examples
         ---------
@@ -653,6 +707,25 @@ class Client:
                     msg = await client.wait_for('message', check=check)
                     await channel.send('Hello {.author}!'.format(msg))
 
+        Waiting for a thumbs up reaction from the message author: ::
+
+            @client.event
+            async def on_message(message):
+                if message.content.startswith('$thumb'):
+                    channel = message.channel
+                    await channel.send('Send me that \N{THUMBS UP SIGN} reaction, mate')
+
+                    def check(reaction, user):
+                        return user == message.author and str(reaction.emoji) == '\N{THUMBS UP SIGN}'
+
+                    try:
+                        reaction, user = await client.wait_for('reaction_add', timeout=60.0, check=check)
+                    except asyncio.TimeoutError:
+                        await channel.send('\N{THUMBS DOWN SIGN}')
+                    else:
+                        await channel.send('\N{THUMBS UP SIGN}')
+
+
         Parameters
         ------------
         event: str
@@ -663,7 +736,7 @@ class Client:
             parameters of the event being waited for.
         timeout: Optional[float]
             The number of seconds to wait before timing out and raising
-            ``asyncio.TimeoutError``\.
+            :exc:`asyncio.TimeoutError`.
 
         Raises
         -------
@@ -673,7 +746,7 @@ class Client:
         Returns
         --------
         Any
-            Returns no arguments, a single argument, or a tuple of multiple
+            Returns no arguments, a single argument, or a :obj:`tuple` of multiple
             arguments that mirrors the parameters passed in the
             :ref:`event reference <discord-api-events>`.
         """
@@ -725,29 +798,35 @@ class Client:
             raise ClientException('event registered must be a coroutine function')
 
         setattr(self, coro.__name__, coro)
-        log.info('%s has successfully been registered as an event', coro.__name__)
+        log.debug('%s has successfully been registered as an event', coro.__name__)
         return coro
 
     def async_event(self, coro):
-        """A shorthand decorator for ``asyncio.coroutine`` + :meth:`event`."""
+        """A shorthand decorator for :func:`asyncio.coroutine` + :meth:`event`."""
         if not asyncio.iscoroutinefunction(coro):
             coro = asyncio.coroutine(coro)
 
         return self.event(coro)
 
     @asyncio.coroutine
-    def change_presence(self, *, game=None, status=None, afk=False):
+    def change_presence(self, *, activity=None, status=None, afk=False):
         """|coro|
 
         Changes the client's presence.
 
-        The game parameter is a Game object (not a string) that represents
-        a game being played currently.
+        The activity parameter is a :class:`Activity` object (not a string) that represents
+        the activity being done currently. This could also be the slimmed down versions,
+        :class:`Game` and :class:`Streaming`.
+
+        Example: ::
+
+            game = discord.Game("with the API")
+            await client.change_presence(status=discord.Status.idle, activity=game)
 
         Parameters
         ----------
-        game: Optional[:class:`Game`]
-            The game being played. None if no game is being played.
+        activity: Optional[Union[:class:`Game`, :class:`Streaming`, :class:`Activity`]]
+            The activity being done. ``None`` if no currently active activity is done.
         status: Optional[:class:`Status`]
             Indicates what status to change to. If None, then
             :attr:`Status.online` is used.
@@ -759,7 +838,7 @@ class Client:
         Raises
         ------
         InvalidArgument
-            If the ``game`` parameter is not :class:`Game` or None.
+            If the ``activity`` parameter is not the proper type.
         """
 
         if status is None:
@@ -772,14 +851,14 @@ class Client:
             status_enum = status
             status = str(status)
 
-        yield from self.ws.change_presence(game=game, status=status, afk=afk)
+        yield from self.ws.change_presence(activity=activity, status=status, afk=afk)
 
         for guild in self._connection.guilds:
             me = guild.me
             if me is None:
                 continue
 
-            me.game = game
+            me.activity = activity
             me.status = status_enum
 
     # Guild stuff
@@ -869,9 +948,6 @@ class Client:
 
         Revokes an :class:`Invite`, URL, or ID to an invite.
 
-        The ``invite`` parameter follows the same rules as
-        :meth:`accept_invite`.
-
         Parameters
         ----------
         invite
@@ -909,7 +985,7 @@ class Client:
             Retrieving the information failed somehow.
         """
         data = yield from self.http.application_info()
-        return AppInfo(id=data['id'], name=data['name'],
+        return AppInfo(id=int(data['id']), name=data['name'],
                        description=data['description'], icon=data['icon'],
                        owner=User(state=self._connection, data=data['owner']))
 
@@ -974,8 +1050,32 @@ class Client:
 
         since = data.get('premium_since')
         mutual_guilds = list(filter(None, map(transform, data.get('mutual_guilds', []))))
-        return Profile(premium=since is not None,
+        user = data['user']
+        return Profile(flags=user.get('flags', 0),
                        premium_since=utils.parse_time(since),
                        mutual_guilds=mutual_guilds,
-                       user=User(data=data['user'], state=state),
+                       user=User(data=user, state=state),
                        connected_accounts=data['connected_accounts'])
+
+    @asyncio.coroutine
+    def get_webhook_info(self, webhook_id):
+        """|coro|
+
+        Retrieves a :class:`Webhook` with the specified ID.
+
+        Raises
+        --------
+        HTTPException
+            Retrieving the webhook failed.
+        NotFound
+            Invalid webhook ID.
+        Forbidden
+            You do not have permission to fetch this webhook.
+
+        Returns
+        ---------
+        :class:`Webhook`
+            The webhook you requested.
+        """
+        data = yield from self.http.get_webhook(webhook_id)
+        return Webhook.from_state(data, state=self._connection)

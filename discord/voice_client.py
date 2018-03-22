@@ -75,11 +75,11 @@ class VoiceClient:
 
     Attributes
     -----------
-    session_id: str
+    session_id: :class:`str`
         The voice connection session ID.
-    token: str
+    token: :class:`str`
         The voice connection token.
-    endpoint: str
+    endpoint: :class:`str`
         The endpoint we are connecting to.
     channel: :class:`abc.Connectable`
         The voice channel connected to.
@@ -190,7 +190,7 @@ class VoiceClient:
         if self._handshake_complete.is_set():
             # terminate the websocket and handle the reconnect loop if necessary.
             self._handshake_complete.clear()
-            yield from self.ws.close(1006)
+            yield from self.ws.close(4000)
             return
 
         self._handshake_complete.set()
@@ -245,13 +245,18 @@ class VoiceClient:
                 self._connected.clear()
                 yield from asyncio.sleep(retry, loop=self.loop)
                 yield from self.terminate_handshake()
-                yield from self.connect(reconnect=True)
+                try:
+                    yield from self.connect(reconnect=True)
+                except asyncio.TimeoutError:
+                    # at this point we've retried 5 times... let's continue the loop.
+                    log.warning('Could not connect to voice... Retrying...')
+                    continue
 
     @asyncio.coroutine
     def disconnect(self, *, force=False):
         """|coro|
 
-        Disconnects all connections to the voice client.
+        Disconnects this voice client from voice.
         """
         if not force and not self._connected.is_set():
             return
@@ -283,7 +288,7 @@ class VoiceClient:
         yield from self.main_ws.voice_state(guild_id, channel.id)
 
     def is_connected(self):
-        """bool: Indicates if the voice client is connected to voice."""
+        """:class:`bool`: Indicates if the voice client is connected to voice."""
         return self._connected.is_set()
 
     # audio related

@@ -56,22 +56,22 @@ class Invite(Hashable):
 
     Attributes
     -----------
-    max_age: int
+    max_age: :class:`int`
         How long the before the invite expires in seconds. A value of 0 indicates that it doesn't expire.
-    code: str
+    code: :class:`str`
         The URL fragment used for the invite.
     guild: :class:`Guild`
         The guild the invite is for.
-    revoked: bool
+    revoked: :class:`bool`
         Indicates if the invite has been revoked.
     created_at: `datetime.datetime`
         A datetime object denoting the time the invite was created.
-    temporary: bool
+    temporary: :class:`bool`
         Indicates that the invite grants temporary membership.
         If True, members who joined via this invite will be kicked upon disconnect.
-    uses: int
+    uses: :class:`int`
         How many times the invite has been used.
-    max_uses: int
+    max_uses: :class:`int`
         How many times the invite can be used.
     inviter: :class:`User`
         The user who created the invite.
@@ -121,6 +121,9 @@ class Invite(Hashable):
     def __repr__(self):
         return '<Invite code={0.code!r}>'.format(self)
 
+    def __hash__(self):
+        return hash(self.code)
+
     @property
     def id(self):
         """Returns the proper code portion of the invite."""
@@ -130,25 +133,6 @@ class Invite(Hashable):
     def url(self):
         """A property that retrieves the invite URL."""
         return 'http://discord.gg/' + self.code
-
-    @asyncio.coroutine
-    def accept(self):
-        """|coro|
-
-        Accepts the instant invite and adds you to the guild
-        the invite is in.
-
-        Raises
-        -------
-        HTTPException
-            Accepting the invite failed.
-        NotFound
-            The invite is invalid or expired.
-        Forbidden
-            You are a bot user and cannot use this endpoint.
-        """
-
-        yield from self._state.http.accept_invite(self.code)
 
     @asyncio.coroutine
     def delete(self, *, reason=None):

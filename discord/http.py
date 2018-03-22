@@ -31,7 +31,6 @@ import sys
 import logging
 import weakref
 import datetime
-from email.utils import parsedate_to_datetime
 from urllib.parse import quote as _uriquote
 
 log = logging.getLogger(__name__)
@@ -54,7 +53,7 @@ class Route:
         self.method = method
         url = (self.BASE + self.path)
         if parameters:
-            self.url = url.format(**parameters)
+            self.url = url.format(**{k: _uriquote(v) if isinstance(v, str) else v for k, v in parameters.items()})
         else:
             self.url = url
 
@@ -88,7 +87,7 @@ class HTTPClient:
     SUCCESS_LOG = '{method} {url} has received {text}'
     REQUEST_LOG = '{method} {url} with {json} has returned {status}'
 
-    def __init__(self, connector=None, *, loop=None):
+    def __init__(self, connector=None, *, proxy=None, proxy_auth=None, loop=None):
         self.loop = asyncio.get_event_loop() if loop is None else loop
         self.connector = connector
         self._session = aiohttp.ClientSession(connector=connector, loop=self.loop)
@@ -97,9 +96,15 @@ class HTTPClient:
         self._global_over.set()
         self.token = None
         self.bot_token = False
+        self.proxy = proxy
+        self.proxy_auth = proxy_auth
 
         user_agent = 'DiscordBot (https://github.com/Rapptz/discord.py {0}) Python/{1[0]}.{1[1]} aiohttp/{2}'
         self.user_agent = user_agent.format(__version__, sys.version_info, aiohttp.__version__)
+
+    def recreate(self):
+        if self._session.closed:
+            self._session = aiohttp.ClientSession(connector=self.connector, loop=self.loop)
 
     @asyncio.coroutine
     def request(self, route, *, header_bypass_delay=None, **kwargs):
@@ -135,6 +140,12 @@ class HTTPClient:
 
         kwargs['headers'] = headers
 
+        # Proxy support
+        if self.proxy is not None:
+            kwargs['proxy'] = self.proxy
+        if self.proxy_auth is not None:
+            kwargs['proxy_auth'] = self.proxy_auth
+
         if not self._global_over.is_set():
             # wait until the global lock is complete
             yield from self._global_over.wait()
@@ -153,13 +164,11 @@ class HTTPClient:
                     if remaining == '0' and r.status != 429:
                         # we've depleted our current bucket
                         if header_bypass_delay is None:
-                            now = parsedate_to_datetime(r.headers['Date'])
-                            reset = datetime.datetime.fromtimestamp(int(r.headers['X-Ratelimit-Reset']), datetime.timezone.utc)
-                            delta = (reset - now).total_seconds()
+                            delta = utils._parse_ratelimit_header(r)
                         else:
                             delta = header_bypass_delay
 
-                        log.info('A rate limit bucket has been exhausted (bucket: %s, retry: %s).', bucket, delta)
+                        log.debug('A rate limit bucket has been exhausted (bucket: %s, retry: %s).', bucket, delta)
                         maybe_lock.defer()
                         self.loop.call_later(delta, lock.release)
 
@@ -193,8 +202,8 @@ class HTTPClient:
 
                         continue
 
-                    # we've received a 502, unconditional retry
-                    if r.status == 502 and tries <= 5:
+                    # we've received a 500 or 502, unconditional retry
+                    if r.status in {500, 502}:
                         yield from asyncio.sleep(1 + tries * 2, loop=self.loop)
                         continue
 
@@ -208,7 +217,10 @@ class HTTPClient:
                 finally:
                     # clean-up just in case
                     yield from r.release()
+            # We've run out of retries, raise.
+            raise HTTPException(r, data)
 
+    @asyncio.coroutine
     def get_attachment(self, url):
         resp = yield from self._session.get(url)
         try:
@@ -375,6 +387,11 @@ class HTTPClient:
                   channel_id=channel_id, message_id=message_id, member_id=member_id, emoji=emoji)
         return self.request(r, header_bypass_delay=0.25)
 
+    def remove_own_reaction(self, message_id, channel_id, emoji):
+        r = Route('DELETE', '/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me',
+                  channel_id=channel_id, message_id=message_id, emoji=emoji)
+        return self.request(r, header_bypass_delay=0.25)
+
     def get_reaction_users(self, message_id, channel_id, emoji, limit, after=None):
         r = Route('GET', '/channels/{channel_id}/messages/{message_id}/reactions/{emoji}',
                          channel_id=channel_id, message_id=message_id, emoji=emoji)
@@ -424,7 +441,9 @@ class HTTPClient:
     def kick(self, user_id, guild_id, reason=None):
         r = Route('DELETE', '/guilds/{guild_id}/members/{user_id}', guild_id=guild_id, user_id=user_id)
         if reason:
-            return self.request(r, params={'reason': reason })
+            # thanks aiohttp
+            r.url = '{0.url}?reason={1}'.format(r, _uriquote(reason))
+
         return self.request(r)
 
     def ban(self, user_id, guild_id, delete_message_days=1, reason=None):
@@ -432,8 +451,10 @@ class HTTPClient:
         params = {
             'delete-message-days': delete_message_days,
         }
+
         if reason:
-            params['reason'] = reason
+            # thanks aiohttp
+            r.url = '{0.url}?reason={1}'.format(r, _uriquote(reason))
 
         return self.request(r, params=params)
 
@@ -489,30 +510,53 @@ class HTTPClient:
 
     def edit_channel(self, channel_id, *, reason=None, **options):
         r = Route('PATCH', '/channels/{channel_id}', channel_id=channel_id)
-        valid_keys = ('name', 'topic', 'bitrate', 'user_limit', 'position')
+        valid_keys = ('name', 'parent_id', 'topic', 'bitrate', 'nsfw', 'user_limit', 'position', 'permission_overwrites')
         payload = {
             k: v for k, v in options.items() if k in valid_keys
         }
 
         return self.request(r, reason=reason, json=payload)
 
-    def move_channel_position(self, guild_id, positions, *, reason=None):
+    def bulk_channel_update(self, guild_id, data, *, reason=None):
         r = Route('PATCH', '/guilds/{guild_id}/channels', guild_id=guild_id)
-        return self.request(r, json=positions, reason=reason)
+        return self.request(r, json=data, reason=reason)
 
-    def create_channel(self, guild_id, name, channe_type, permission_overwrites=None, *, reason=None):
+    def create_channel(self, guild_id, name, channel_type, parent_id=None, permission_overwrites=None, *, reason=None):
         payload = {
             'name': name,
-            'type': channe_type
+            'type': channel_type
         }
 
         if permission_overwrites is not None:
             payload['permission_overwrites'] = permission_overwrites
 
+        if parent_id is not None:
+            payload['parent_id'] = parent_id
+
         return self.request(Route('POST', '/guilds/{guild_id}/channels', guild_id=guild_id), json=payload, reason=reason)
 
     def delete_channel(self, channel_id, *, reason=None):
         return self.request(Route('DELETE', '/channels/{channel_id}', channel_id=channel_id), reason=reason)
+
+    # Webhook management
+
+    def create_webhook(self, channel_id, *, name=None, avatar=None):
+        payload = {}
+        if name is not None:
+            payload['name'] = name
+        if avatar is not None:
+            payload['avatar'] = avatar
+
+        return self.request(Route('POST', '/channels/{channel_id}/webhooks', channel_id=channel_id), json=payload)
+
+    def channel_webhooks(self, channel_id):
+        return self.request(Route('GET', '/channels/{channel_id}/webhooks', channel_id=channel_id))
+
+    def guild_webhooks(self, guild_id):
+        return self.request(Route('GET', '/guilds/{guild_id}/webhooks', guild_id=guild_id))
+
+    def get_webhook(self, webhook_id):
+        return self.request(Route('GET', '/webhooks/{webhook_id}', webhook_id=webhook_id))
 
     # Guild management
 
@@ -533,7 +577,8 @@ class HTTPClient:
 
     def edit_guild(self, guild_id, *, reason=None, **fields):
         valid_keys = ('name', 'region', 'icon', 'afk_timeout', 'owner_id',
-                      'afk_channel_id', 'splash', 'verification_level')
+                      'afk_channel_id', 'splash', 'verification_level',
+                      'system_channel_id')
 
         payload = {
             k: v for k, v in fields.items() if k in valid_keys
@@ -676,7 +721,6 @@ class HTTPClient:
     def move_member(self, user_id, guild_id, channel_id, *, reason=None):
         return self.edit_member(guild_id=guild_id, user_id=user_id, channel_id=channel_id, reason=reason)
 
-
     # Relationship related
 
     def remove_relationship(self, user_id):
@@ -705,21 +749,29 @@ class HTTPClient:
         return self.request(Route('GET', '/oauth2/applications/@me'))
 
     @asyncio.coroutine
-    def get_gateway(self):
+    def get_gateway(self, *, encoding='json', v=6, zlib=True):
         try:
             data = yield from self.request(Route('GET', '/gateway'))
         except HTTPException as e:
             raise GatewayNotFound() from e
-        return data.get('url') + '?encoding=json&v=6'
+        if zlib:
+            value = '{0}?encoding={1}&v={2}&compress=zlib-stream'
+        else:
+            value = '{0}?encoding={1}&v={2}'
+        return value.format(data['url'], encoding, v)
 
     @asyncio.coroutine
-    def get_bot_gateway(self):
+    def get_bot_gateway(self, *, encoding='json', v=6, zlib=True):
         try:
             data = yield from self.request(Route('GET', '/gateway/bot'))
         except HTTPException as e:
             raise GatewayNotFound() from e
+
+        if zlib:
+            value = '{0}?encoding={1}&v={2}&compress=zlib-stream'
         else:
-            return data['shards'], data['url'] + '?encoding=json&v=6'
+            value = '{0}?encoding={1}&v={2}'
+        return data['shards'], value.format(data['url'], encoding, v)
 
     def get_user_info(self, user_id):
         return self.request(Route('GET', '/users/{user_id}', user_id=user_id))

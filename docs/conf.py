@@ -22,6 +22,7 @@ on_rtd = os.getenv('READTHEDOCS') == 'True'
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 sys.path.insert(0, os.path.abspath('..'))
+sys.path.append(os.path.abspath('extensions'))
 
 # -- General configuration ------------------------------------------------
 
@@ -34,7 +35,9 @@ sys.path.insert(0, os.path.abspath('..'))
 extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.extlinks',
-    'sphinxcontrib.asyncio'
+    'sphinx.ext.intersphinx',
+    'sphinxcontrib.asyncio',
+    'details'
 ]
 
 if on_rtd:
@@ -48,8 +51,12 @@ extlinks = {
     'issue': ('https://github.com/Rapptz/discord.py/issues/%s', 'issue '),
 }
 
+# Links used for cross-referencing stuff in other documentation
+intersphinx_mapping = {'python': ('https://docs.python.org/3', None)}
+
 rst_prolog = """
 .. |coro| replace:: This function is a |corourl|_.
+.. |maybecoro| replace:: This function *could be a* |corourl|_.
 .. |corourl| replace:: *coroutine*
 .. _corourl: https://docs.python.org/3/library/asyncio-task.html#coroutine
 """
@@ -126,6 +133,8 @@ pygments_style = 'friendly'
 
 
 # -- Options for HTML output ----------------------------------------------
+
+html_experimental_html5_writer = True
 
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.

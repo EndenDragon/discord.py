@@ -83,6 +83,22 @@ def _convert_to_bool(argument):
     else:
         raise BadArgument(lowered + ' is not a recognised boolean option')
 
+class _CaseInsensitiveDict(dict):
+    def __contains__(self, k):
+        return super().__contains__(k.lower())
+
+    def __delitem__(self, k):
+        return super().__delitem__(k.lower())
+
+    def __getitem__(self, k):
+        return super().__getitem__(k.lower())
+
+    def get(self, k, default=None):
+        return super().get(k.lower(), default)
+
+    def __setitem__(self, k, v):
+        super().__setitem__(k.lower(), v)
+
 class Command:
     """A class that implements the protocol for a bot text command.
 
@@ -91,23 +107,20 @@ class Command:
 
     Attributes
     -----------
-    name: str
+    name: :class:`str`
         The name of the command.
-    callback: coroutine
+    callback: :ref:`coroutine <coroutine>`
         The coroutine that is executed when the command is called.
-    help: str
+    help: :class:`str`
         The long help text for the command.
-    brief: str
+    brief: :class:`str`
         The short help text for the command. If this is not specified
         then the first line of the long help text is used instead.
-    usage: str
+    usage: :class:`str`
         A replacement for arguments in the default help text.
-    aliases: list
+    aliases: :class:`list`
         The list of aliases the command can be invoked under.
-    pass_context: bool
-        A boolean that indicates that the current :class:`.Context` should
-        be passed as the **first parameter**. Defaults to `True`.
-    enabled: bool
+    enabled: :class:`bool`
         A boolean that indicates if the command is currently enabled.
         If the command is invoked while it is disabled, then
         :exc:`.DisabledCommand` is raised to the :func:`.on_command_error`
@@ -122,19 +135,19 @@ class Command:
         :exc:`.CommandError` should be used. Note that if the checks fail then
         :exc:`.CheckFailure` exception is raised to the :func:`.on_command_error`
         event.
-    description: str
+    description: :class:`str`
         The message prefixed into the default help command.
-    hidden: bool
+    hidden: :class:`bool`
         If ``True``\, the default help command does not show this in the
         help output.
-    rest_is_raw: bool
+    rest_is_raw: :class:`bool`
         If ``False`` and a keyword-only argument is provided then the keyword
         only argument is stripped and handled as if it was a regular argument
         that handles :exc:`.MissingRequiredArgument` and default values in a
         regular matter rather than passing the rest completely raw. If ``True``
         then the keyword-only argument will pass in the rest of the arguments
         in a completely raw matter. Defaults to ``False``.
-    ignore_extra: bool
+    ignore_extra: :class:`bool`
         If ``True``\, ignores extraneous strings passed to a command if all its
         requirements are met (e.g. ``?foo a b c`` when only expecting ``a``
         and ``b``). Otherwise :func:`.on_command_error` and local error handlers
@@ -152,7 +165,10 @@ class Command:
         self.usage = kwargs.get('usage')
         self.rest_is_raw = kwargs.get('rest_is_raw', False)
         self.aliases = kwargs.get('aliases', [])
-        self.pass_context = kwargs.get('pass_context', True)
+
+        if not isinstance(self.aliases, (list, tuple)):
+            raise TypeError("Aliases of a command must be a list of strings.")
+
         self.description = inspect.cleandoc(kwargs.get('description', ''))
         self.hidden = kwargs.get('hidden', False)
         signature = inspect.signature(callback)
@@ -201,8 +217,13 @@ class Command:
         if converter is bool:
             return _convert_to_bool(argument)
 
-        if converter.__module__.startswith('discord.') and not converter.__module__.endswith('converter'):
-            converter = getattr(converters, converter.__name__ + 'Converter')
+        try:
+            module = converter.__module__
+        except:
+            pass
+        else:
+            if module.startswith('discord.') and not module.endswith('converter'):
+                converter = getattr(converters, converter.__name__ + 'Converter')
 
         if inspect.isclass(converter):
             if issubclass(converter, converters.Converter):
@@ -272,9 +293,11 @@ class Command:
             # first parameter is self
             result.popitem(last=False)
 
-        if self.pass_context:
+        try:
             # first/second parameter is context
             result.popitem(last=False)
+        except Exception as e:
+            raise ValueError('Missing context parameter') from None
 
         return result
 
@@ -307,8 +330,10 @@ class Command:
         while command.parent is not None:
             command = command.parent
             entries.append(command)
-        entries.append(None)
-        entries.reverse()
+
+        if len(entries) == 0:
+            return None
+
         return entries[-1]
 
     @property
@@ -331,12 +356,11 @@ class Command:
 
     @asyncio.coroutine
     def _parse_arguments(self, ctx):
-        ctx.args = [] if self.instance is None else [self.instance]
+        ctx.args = [ctx] if self.instance is None else [self.instance, ctx]
         ctx.kwargs = {}
         args = ctx.args
         kwargs = ctx.kwargs
 
-        first = True
         view = ctx.view
         iterator = iter(self.params.items())
 
@@ -349,12 +373,14 @@ class Command:
                 fmt = 'Callback for {0.name} command is missing "self" parameter.'
                 raise discord.ClientException(fmt.format(self))
 
-        for name, param in iterator:
-            if first and self.pass_context:
-                args.append(ctx)
-                first = False
-                continue
+        # next we have the 'ctx' as the next parameter
+        try:
+            next(iterator)
+        except StopIteration:
+            fmt = 'Callback for {0.name} command is missing "ctx" parameter.'
+            raise discord.ClientException(fmt.format(self))
 
+        for name, param in iterator:
             if param.kind == param.POSITIONAL_OR_KEYWORD:
                 transformed = yield from self.transform(ctx, param)
                 args.append(transformed)
@@ -437,13 +463,32 @@ class Command:
         yield from self._verify_checks(ctx)
 
         if self._buckets.valid:
-            bucket = self._buckets.get_bucket(ctx)
-            retry_after = bucket.is_rate_limited()
+            bucket = self._buckets.get_bucket(ctx.message)
+            retry_after = bucket.update_rate_limit()
             if retry_after:
                 raise CommandOnCooldown(bucket, retry_after)
 
         yield from self._parse_arguments(ctx)
         yield from self.call_before_hooks(ctx)
+
+    def is_on_cooldown(self, ctx):
+        """Checks whether the command is currently on cooldown.
+
+        Parameters
+        -----------
+        ctx: :class:`.Context.`
+            The invocation context to use when checking the commands cooldown status.
+
+        Returns
+        --------
+        bool
+            A boolean indicating if the command is on cooldown.
+        """
+        if not self._buckets.valid:
+            return False
+
+        bucket = self._buckets.get_bucket(ctx.message)
+        return bucket.get_tokens() == 0
 
     def reset_cooldown(self, ctx):
         """Resets the cooldown on this command.
@@ -454,7 +499,7 @@ class Command:
             The invocation context to reset the cooldown under.
         """
         if self._buckets.valid:
-            bucket = self._buckets.get_bucket(ctx)
+            bucket = self._buckets.get_bucket(ctx.message)
             bucket.reset()
 
     @asyncio.coroutine
@@ -495,7 +540,7 @@ class Command:
 
         Parameters
         -----------
-        coro
+        coro : :ref:`coroutine <coroutine>`
             The coroutine to register as the local error handler.
 
         Raises
@@ -634,6 +679,12 @@ class Command:
         ctx: :class:`.Context`
             The ctx of the command currently being invoked.
 
+        Raises
+        -------
+        :class:`CommandError`
+            Any command error that was raised during a check call will be propagated
+            by this function.
+
         Returns
         --------
         bool
@@ -673,12 +724,16 @@ class GroupMixin:
 
     Attributes
     -----------
-    all_commands: dict
+    all_commands: :class:`dict`
         A mapping of command name to :class:`.Command` or superclass
         objects.
+    case_insensitive: :class:`bool`
+        Whether the commands should be case insensitive. Defaults to ``False``.
     """
     def __init__(self, **kwargs):
-        self.all_commands = {}
+        case_insensitive = kwargs.get('case_insensitive', False)
+        self.all_commands = _CaseInsensitiveDict() if case_insensitive else {}
+        self.case_insensitive = case_insensitive
         super().__init__(**kwargs)
 
     @property
@@ -831,7 +886,7 @@ class Group(GroupMixin, Command):
 
     Attributes
     -----------
-    invoke_without_command: bool
+    invoke_without_command: :class:`bool`
         Indicates if the group callback should begin parsing and
         invocation only if no subcommand was found. Useful for
         making it an error handling function to tell the user that
@@ -840,6 +895,9 @@ class Group(GroupMixin, Command):
         the group callback will always be invoked first. This means
         that the checks and the parsing dictated by its parameters
         will be executed. Defaults to ``False``.
+    case_insensitive: :class:`bool`
+        Indicates if the group's commands should be case insensitive.
+        Defaults to ``False``.
     """
     def __init__(self, **attrs):
         self.invoke_without_command = attrs.pop('invoke_without_command', False)
@@ -920,7 +978,7 @@ def command(name=None, cls=None, **attrs):
     By default the ``help`` attribute is received automatically from the
     docstring of the function and is cleaned up with the use of
     ``inspect.cleandoc``. If the docstring is ``bytes``, then it is decoded
-    into ``str`` using utf-8 encoding.
+    into :class:`str` using utf-8 encoding.
 
     All checks added using the :func:`.check` & co. decorators are added into
     the function. There is no way to supply your own checks through this
@@ -1115,6 +1173,9 @@ def has_permissions(**perms):
     The permissions passed in must be exactly like the properties shown under
     :class:`.discord.Permissions`.
 
+    This check raises a special exception, :exc:`.MissingPermissions`
+    that is derived from :exc:`.CheckFailure`.
+
     Parameters
     ------------
     perms
@@ -1134,7 +1195,13 @@ def has_permissions(**perms):
     def predicate(ctx):
         ch = ctx.channel
         permissions = ch.permissions_for(ctx.author)
-        return all(getattr(permissions, perm, None) == value for perm, value in perms.items())
+
+        missing = [perm for perm, value in perms.items() if getattr(permissions, perm, None) != value]
+
+        if not missing:
+            return True
+
+        raise MissingPermissions(missing)
 
     return check(predicate)
 
@@ -1168,12 +1235,22 @@ def bot_has_any_role(*names):
 def bot_has_permissions(**perms):
     """Similar to :func:`.has_permissions` except checks if the bot itself has
     the permissions listed.
+
+    This check raises a special exception, :exc:`.BotMissingPermissions`
+    that is derived from :exc:`.CheckFailure`.
     """
     def predicate(ctx):
         guild = ctx.guild
         me = guild.me if guild is not None else ctx.bot.user
         permissions = ctx.channel.permissions_for(me)
-        return all(getattr(permissions, perm, None) == value for perm, value in perms.items())
+
+        missing = [perm for perm, value in perms.items() if getattr(permissions, perm, None) != value]
+
+        if not missing:
+            return True
+
+        raise BotMissingPermissions(missing)
+
     return check(predicate)
 
 def guild_only():

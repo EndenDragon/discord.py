@@ -105,6 +105,7 @@ class AuditLogChanges:
         'inviter_id':              ('inviter', _transform_inviter_id),
         'channel_id':              ('channel', _transform_channel),
         'afk_channel_id':          ('afk_channel', _transform_channel),
+        'system_channel_id':       ('system_channel', _transform_channel),
         'widget_channel_id':       ('widget_channel', _transform_channel),
         'permission_overwrites':   ('overwrites', _transform_overwrites),
         'splash_hash':             ('splash', None),
@@ -188,12 +189,12 @@ class AuditLogEntry:
     user: :class:`abc.User`
         The user who initiated this action. Usually a :class:`Member`\, unless gone
         then it's a :class:`User`.
-    id: int
+    id: :class:`int`
         The entry ID.
     target: Any
         The target that got changed. The exact type of this depends on
         the action being done.
-    reason: Optional[str]
+    reason: Optional[:class:`str`]
         The reason this action was done.
     extra: Any
         Extra information that this entry has that might be useful.
@@ -247,7 +248,7 @@ class AuditLogEntry:
         # into meaningful data when requested
         self._changes = data.get('changes', [])
 
-        self.user = self._get_member(int(data['user_id']))
+        self.user = self._get_member(utils._get_as_snowflake(data, 'user_id'))
         self._target_id = utils._get_as_snowflake(data, 'target_id')
 
     def _get_member(self, user_id):

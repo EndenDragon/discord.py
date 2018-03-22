@@ -17,6 +17,10 @@ Bot
 .. autoclass:: discord.ext.commands.AutoShardedBot
     :members:
 
+.. autofunction:: discord.ext.commands.when_mentioned
+
+.. autofunction:: discord.ext.commands.when_mentioned_or
+
 .. _ext_commands_api_events:
 
 Event Reference
@@ -148,6 +152,12 @@ Converters
 .. autoclass:: discord.ext.commands.TextChannelConverter
     :members:
 
+.. autoclass:: discord.ext.commands.VoiceChannelConverter
+    :members:
+
+.. autoclass:: discord.ext.commands.CategoryChannelConverter
+    :members:
+
 .. autoclass:: discord.ext.commands.InviteConverter
     :members:
 
@@ -160,10 +170,10 @@ Converters
 .. autoclass:: discord.ext.commands.ColourConverter
     :members:
 
-.. autoclass:: discord.ext.commands.VoiceChannelConverter
+.. autoclass:: discord.ext.commands.EmojiConverter
     :members:
 
-.. autoclass:: discord.ext.commands.EmojiConverter
+.. autoclass:: discord.ext.commands.PartialEmojiConverter
     :members:
 
 .. autoclass:: discord.ext.commands.clean_content
@@ -208,5 +218,11 @@ Errors
     :members:
 
 .. autoexception:: discord.ext.commands.NotOwner
+    :members:
+
+.. autoexception:: discord.ext.commands.MissingPermissions
+    :members:
+
+.. autoexception:: discord.ext.commands.BotMissingPermissions
     :members:
 
